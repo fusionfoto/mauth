@@ -13,6 +13,7 @@
 import hmac
 import hashlib
 import base64
+from urllib import quote
 
 from webob.exc import HTTPForbidden, HTTPNotFound, HTTPUnauthorized
 from webob import Request, Response
@@ -105,6 +106,7 @@ class MultiAuth(object):
     def __init__(self, app, conf):
         self.app = app
         self.conf = conf
+        self.auth_prefix = conf.get('auth_prefix', 'auth')
         self.logger = get_logger(conf, log_route='mauth')
         self.reseller_prefix = conf.get('reseller_prefix', '').strip()
         self.cache_timeout = int(conf.get('cache_timeout', 86400))
@@ -189,7 +191,7 @@ class MultiAuth(object):
                 return HTTPNotFound(request=req)
 
             # Check if the request is for authentication (to get a token).
-            if auth_url_piece in ('auth', 'v1.0'): # valid auth urls
+            if auth_url_piece in (self.auth_prefix, 'v1.0'): # valid auth urls
                 auth_user = env.get('HTTP_X_AUTH_USER', None)
                 auth_key = env.get('HTTP_X_AUTH_KEY', None)
                 if auth_user and auth_key:
@@ -212,6 +214,7 @@ class MultiAuth(object):
                                                          'x-storage-url':identity.get('account_url', None)})
                         return req.response(env, start_response)
                     else: # hit cloudstack for the details.
+                        self.logger.debug("Calling get_identity...")
                         identity = self.get_identity(env, start_response, auth_user, auth_key)
                         
                         if identity:
@@ -222,10 +225,12 @@ class MultiAuth(object):
                             identity['account_url'] = account_url
                                 
                             # add to memcache so it can be referenced later
+                            timeout = env.get('HTTP_X_AUTH_TTL', self.cache_timeout)
+                            expires = time() + timeout 
                             memcache_client = cache_from_env(env)
                             if memcache_client:
-                                memcache_client.set('mauth_creds/%s/%s' % (auth_user, auth_key), (expires, identity), timeout=env.get('HTTP_X_AUTH_TTL', self.cache_timeout))
-                                memcache_client.set('mauth_token/%s' % identity.get('token', ''), (expires, identity), timeout=env.get('HTTP_X_AUTH_TTL', self.cache_timeout))
+                                memcache_client.set('mauth_creds/%s/%s' % (auth_user, auth_key), (expires, identity), timeout=timeout)
+                                memcache_client.set('mauth_token/%s' % identity.get('token', ''), (expires, identity), timeout=timeout)
                             req.response = Response(request=req,
                                                     headers={'x-auth-token':identity.get('token', None), 
                                                              'x-storage-token':identity.get('token', None),
